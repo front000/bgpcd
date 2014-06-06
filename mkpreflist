@@ -1,0 +1,235 @@
+#!/usr/bin/perl -w
+use strict;
+
+use Data::Dumper;
+use HTML::Template;
+use Config::Simple '-strict';
+use Getopt::Long qw(:config ignorecase_always bundling);
+use Switch;
+
+my %data = ();
+my %a = ();
+
+### Options
+
+Getopt::Long::Configure ("bundling", "ignorecase_always");
+my ($help, $verbose, $template, $aggregate, $whost, $peering, $origin, $config);
+GetOptions (
+	'help|h'			=> \$help,			# view help()
+	'verbose|v'		=> \$verbose,		# verbose mode
+	'template|t=s'	=> \$template,		# template type: force10, juniper, cisco
+	'whois|w'		=> \$whost,			# whois host: whois.ripe.net by default, whois.arin.net, etc
+	'aggregate|a'	=> \$aggregate,	# aggregate nets
+	'peering|p'		=> \$peering,		# generate prefix-list for peering connections
+	'origin|o=s'	=> \$origin,
+	'config|c=s'	=> \$config
+);
+
+### Checking input
+help () if $help || !$origin;
+
+### Configuration
+
+$config = "/etc/bgpcd.conf" if !$config;
+my $cfg = Config::Simple->new ($config);
+
+undef $template if $template && $template eq 'dump';
+my $tplfile = ($template) ? "$template.tpl" : "/dev/null";
+my $tpl = HTML::Template->new (
+	filename	=> $tplfile,
+	path		=> [ $cfg->param('tplpath') ],
+	die_on_bad_params	=> 0
+);
+
+my $whois = "/usr/bin/whois -h " . $cfg->param('whois_host');
+
+### Subroutine functions
+
+sub help {
+	printf "$0 - generates prefix-lists for any device (force10, cisco, juniper)\n";
+	printf "Usage: $0 [OPTIONS] -o origin\n\n";
+	
+	printf "Binding keys\n==========\n";
+	printf ("%15s ", "--origin/-o");
+	printf "- origin like AS-NUM or AUT-NUM\n\n";
+
+	printf "Options:\n==========\n";
+	printf ("%15s ", "--template/-t");
+	printf "- output template (force10, cisco, juniper, dump), default dump\n";
+	printf ("%15s ", "--config/-c");
+	printf "- config file, default /etc/bgpcd.conf\n";
+	printf ("%15s ", "--whois/-w");
+	printf "- whois host, default whois.ripe.net\n";
+	printf ("%15s ", "--aggregate/-a");
+	printf "- aggregate routes, default no\n";
+	printf ("%15s ", "--peering/-p");
+	printf "- prefix-lists for peering connections, used only with AUT-NUM, default no\n";
+	printf ("%15s ", "--verbose/-v");
+	printf "- verbose mode\n";
+	printf ("%15s ", "--help/-h");
+	printf "- view this help\n\n";
+
+	printf "Example:\n==========\n";
+	printf "$0 -o AS-MTW\n";
+
+	exit 1;
+}
+
+sub get_preflist_name {
+	my $as = shift;
+	my $value;
+
+	switch ($as) {
+		case /as\-/i			{ $value = generate_preflist_name_by_as ($as) }
+		case /^as[0-9]+$/i	{ $value = generate_preflist_name_by_as ( get_asname_by_autnum ($as) ) }
+		else						{ $value = 'unknown' }
+	}
+
+	# prefix-list names from user config
+	my $unames = $cfg->param (-block => 'preflist-names');
+	$value = $unames->{ $value } if exists $unames->{ $value };
+
+	$value = substr $value, 0, 16 if $template && $template eq 'force10'; # fix for force10 max prefix-list name length
+
+	return $value;
+}
+
+sub generate_preflist_name_by_as {
+	my $as = shift;
+	$as =~ s/^AS\-//g;
+	return $cfg->param ('prefix') . "-" . lc ($as);
+}
+
+sub get_asname_by_autnum {
+	my $as = shift;
+	$as = (split /\s+/, (grep {/^as-name/} split /\n/, `$whois $as`)[ 0 ])[ 1 ];
+	$as =~ s/\-AS[0-9]{0,}$//;
+	return $as;
+}
+
+### Functions
+
+sub get_customers_by_asset {
+	my $asset = shift || return 0;
+	my @customers = grep {/members/} split /\n/, `$whois $asset`;
+
+	for (my $i = 0; $i < scalar @customers; $i++) {
+		my $as = (split /\s+/, $customers[ $i ])[ 1 ];
+		$customers[ $i ] = $as;
+	}
+
+	return \@customers;
+}
+
+sub get_customers_by_autnum {
+	push @{ $data{ $origin } }, @{ get_routes ($origin) };
+	my (@customers) = ();
+	my %tmp = ();
+
+	# create prefix-lists for peering connections
+	if ($peering) {
+		@customers = grep {!/ANY$/i} grep {/import/} split /\n/, `$whois $origin`;
+
+		for (my $i = 0; $i < scalar @customers; $i++) {
+			my $as = (split /accept\s+/, $customers[ $i ])[ 1 ];
+			$customers[ $i ] = $as;
+		}
+
+		return \@customers;
+	}
+
+	# do not create prefix-list for peering connections
+	@customers = grep {/^import|^export/} split /\n/, `$whois $origin`;
+	foreach (@customers) {
+		my ($method, $as, $type);
+		my @tmp = ();
+
+		$method = (split /\:/, $_)[ 0 ]; # input/export
+		$as = (split /\s+/, $_)[ 2 ];
+		$type = (split /accept\s+|announce\s+/, $_)[ 1 ];
+
+		$tmp{ $as }{ $method } = $type;
+	}
+
+	@customers = ();
+	foreach (keys %tmp) {
+		next if ($tmp{ $_ }{ import } eq 'ANY' || $tmp{ $_ }{ export } ne 'ANY');
+		push @customers, $tmp{ $_ }{ import };
+	}
+
+	return \@customers;
+}
+
+sub get_routes {
+	my $autnum = shift || return 0;
+	my @routes = grep {/^route\:/} split /\n/, `$whois -i origin -r $autnum`;
+
+	for (my $i = 0; $i < scalar @routes; $i++) {
+		my $route = (split /\s+/, $routes[ $i ])[ 1 ];
+		$routes[ $i ] = $route;
+	}
+	return \@routes;
+}
+
+sub mkdata {
+	my ($p_asset, $asset) = @_;
+	$asset = $p_asset if !defined $asset;
+
+	return 0 if exists $a{ $asset };
+	$a{ $p_asset } = 1 if !exists $a{ $p_asset };
+	$a{ $asset } = 1;
+
+	if ($asset !~ m/AS\-/i) {
+		push @{ $data{ $p_asset } }, @{ get_routes ( $_ ) };
+		return 0;
+	}
+
+	my $customers = get_customers_by_asset ($asset);
+	foreach (@$customers) {
+		mkdata ($p_asset, $_) if $_ =~ m/AS\-/i;
+		push @{ $data{ $p_asset } }, @{ get_routes ($_) };
+	}
+
+	return 0;
+}
+
+### Generating data
+my $customers = ($origin =~ m/^AS\-/i) ? get_customers_by_asset ($origin) : get_customers_by_autnum ();
+foreach (@$customers) {
+	mkdata ($_);
+}
+
+### Output data
+my @list = ();
+foreach (keys %data) {
+	my $key = get_preflist_name ($_);
+	next if exists $data{ $key };
+
+	$data{ $key } = $data{ $_ };
+	delete $data{ $_ };
+
+	next if !$template;
+
+	my @routes = ();
+	for (my $i = 0, my $k = 5; $i < scalar @{ $data{ $key } }; $i++, $k += 5) {
+		push @routes, {
+			seq	=> $k,
+			route	=> ${ $data{ $key } }[ $i ],
+			'prefix-list' => $key
+		}
+	}
+
+	push @list, {
+		'prefix-list'	=> $key,
+		routes	=> \@routes
+	}
+}
+
+if (!$template) {
+	print Dumper (\%data);
+} else {
+	$tpl->param (list	=> \@list);
+	print $tpl->output ();
+}
+
+exit 0;
