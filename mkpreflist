@@ -26,6 +26,7 @@ GetOptions (
 );
 
 ### Checking input
+
 help () if $help || !$origin;
 
 ### Configuration
