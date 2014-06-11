@@ -1,0 +1,357 @@
+#!/usr/bin/perl -w
+use strict;
+
+=head1 About
+	Script for setup blackhole route.
+	Using ssh, tool login gateway and make route (with default netmask /32) null with tag 666. Another netmask excluded now.
+=cut
+
+$ENV{ HOME } = "/tmp";
+$ENV{ PATH } = "/bin:/usr/bin";
+
+use Data::Dumper;
+use Getopt::Long qw(:config ignorecase_always bundling);
+use Config::Simple '-strict';
+use Net::SSH::Perl;
+use Net::SSH::Expect;
+use Switch;
+
+### Options
+
+use constant TIMEOUT	=> 3;
+
+Getopt::Long::Configure ("bundling", "ignorecase_always");
+my ($help, $config, $gateway, $route, $force, $verbose, $delete);
+
+GetOptions (
+	'help|h'			=> \$help,
+	'config|c=s'	=> \$config,
+	'gateway|g=s'	=> \$gateway,	# gateway name
+	'route|r=s'		=> \$route,		# blackholed route
+	'force|f'		=> \$force,		# do not ask if netmask not /32
+	'verbose|v'		=> \$verbose,
+	'delete|d'		=> \$delete
+);
+
+### Checking input and loading configuration
+
+help () if !$gateway || !$route || !is_valid_route (); # || (!$force && get_netmask ($route) != 32);
+
+$route = is_valid_route ();
+die "Incorrect route value, use --help for help" if !$route;
+
+$config = '/etc/bgpcd.conf' if !$config;
+my $cfg = Config::Simple->new ($config);
+
+my $conn = is_valid_gateway ();
+die "Could not load configuration for gateway $gateway" if !$conn;
+
+print Dumper ({
+	config	=> $config,
+	gateway	=> $gateway,
+	route		=> $route,
+	force		=> $force,
+}) if $verbose;
+
+### Subroutine functions
+
+sub help {
+	printf "$0 - tool for adding routes /32 into blackhole\n";
+	printf "Usage: $0 [OPTIONS] [-d] -g <gateway> -r <route>\n\n";
+
+	printf "Binding keys:\n==========\n";
+	printf ("%15s ", "--gateway/-g");
+	printf "- gateway name from config\n";
+	printf ("%15s ", "--route/-r");
+	printf "- blackholed route, netmask ignored in this version, only /32\n";
+	printf ("%15s ", "--delete/-d");
+	printf "- delete route from blackhole\n\n";
+
+	printf "Options:\n==========\n";
+	printf ("%15s ", "--config/-c");
+	printf "- path to configuration file\n";
+	printf ("%15s ", "--force/-f");
+	printf "- force mode\n";
+	printf ("%15s ", "--verbose/-v");
+	printf "- verbose mode\n";
+	printf ("%15s ", "--help/-h");
+	printf "- view this help\n";
+
+	exit 1;
+}
+
+sub is_valid_route {
+	$route =~ s/\/.*$//;
+	
+	return 0 if $route !~ m/^\d+\.\d+\.\d+\.\d+$/;
+
+	my @t = split /\./, $route;
+	return 0 if $t[ 0 ] <= 0 || $t[ 3 ] <= 0;
+
+	for (my $i = 0; $i < scalar @t; $i++) {
+		return 0 if $t[ $i ] > 255;
+	}
+
+	return $route;
+}
+
+sub is_valid_gateway {
+	my $h = $cfg->param (-block => 'gateway') or die "Could not found section [gateway] in configuration file $config";
+	my %r = ();
+
+	foreach (keys %$h) {
+		next if $_ !~ m/^$gateway/;
+		my $k = (split /\./, $_, 2)[ 1 ];
+		$r{ $k } = $h->{ $_ };
+	}
+
+	return (scalar (keys %r) < 4) ? 0 : \%r;
+}
+
+sub add_logentry {
+	return 0 if $cfg->param ("blocked.$route");
+
+	$cfg->param (
+		-block 	=> 'blocked',
+		-values	=> { $route => time() }
+	);
+	$cfg->write ();
+
+	return 1;
+}
+
+sub del_logentry {
+	$cfg->delete ("blocked.$route");
+	$cfg->write ();
+	return 0;
+}
+
+sub get_blocked_time {
+	my $value = $cfg->param ("blocked.$route") or return 0;
+	return time () - $value;
+}
+
+sub invert_value {
+	switch (shift) {
+		case 0 { return 1 }
+		case 1 { return 0 }
+		else { return 0 }
+	}
+
+	return 0;
+}
+
+### Functions
+
+sub set_blackhole {
+	print Dumper ($conn) if $verbose;
+	return 2 if get_blocked_time () && get_blocked_time () < 1800 && !$force;
+
+	my $ssh = ssh_connect ();
+	return 0 if !$ssh;
+
+	my $value = set_route ($ssh);
+	$ssh->close ();
+
+	return $value;
+}
+
+sub ssh_connect {
+	my $ssh = Net::SSH::Expect->new (
+		host	=> $conn->{ address },
+		user	=> $conn->{ username },
+		password 	=> $conn->{ password },
+		raw_pty		=> 1,
+		no_terminal	=> 1,
+		timeout		=> 3,
+		debug			=> ($verbose) ? 1 : 0
+	);
+
+	$ssh->login ();
+	$ssh->waitfor ('>', TIMEOUT);
+
+	return $ssh;
+}
+
+sub set_route {
+	my $ssh = shift || return 0;
+	my ($cmd, $value);
+
+=head2 Scenarios
+
+=> ssh connect
+
+### Cisco routers ###
+
+cisco>enable 
+Password: 
+cisco#conf t
+Enter configuration commands, one per line.  End with CNTL/Z.
+cisco(config)#ip route x.x.x.x 255.255.255.255 null 0 tag 666
+cisco(config)#do sh ip route x.x.x.x 255.255.255.255
+Routing entry for x.x.x.x/32
+  Known via "static", distance 1, metric 0 (connected)
+  Tag 666
+  Routing Descriptor Blocks:
+  * directly connected, via Null0
+		Route metric is 0, traffic share count is 1
+		Route tag 666
+
+
+### Juniper routers ###
+
+juniper> configure 
+Entering configuration mode
+
+[edit]
+juniper# set routing-options static route x.x.x.x/32 discard 
+
+[edit]
+juniper# commit 
+commit complete
+
+[edit]
+juniper# run show route x.x.x.x/32 exact    
+
+inet.0: 502882 destinations, 1499959 routes (502634 active, 0 holddown, 1152 hidden)
++ = Active Route, - = Last Active, * = Both
+
+x.x.x.x/32     *[Static/5] 00:00:02
+                      Discard
+
+[edit]
+juniper#quit
+
+
+### Force10 routers ###
+
+force10#conf t
+force10(conf)#ip route x.x.x.x/32 null 0 tag 666
+force10(conf)#do sh ip route x.x.x.x/32 longer-prefixes 
+
+Codes: C - connected, S - static, R - RIP,
+       B - BGP, IN - internal BGP, EX - external BGP,LO - Locally Originated,
+       O - OSPF, IA - OSPF inter area, N1 - OSPF NSSA external type 1,
+       N2 - OSPF NSSA external type 2, E1 - OSPF external type 1,
+       E2 - OSPF external type 2, i - IS-IS, L1 - IS-IS level-1,
+       L2 - IS-IS level-2, IA - IS-IS inter area, * - candidate default,
+       > - non-active route, + - summary route
+
+       Destination        Gateway                      Dist/Metric Last Change
+       -----------        -------                      ----------- -----------
+  S    x.x.x.x/32     Direct, Nu 0                         0/0    00:00:06
+
+=> ssh disconnect
+
+
+=cut
+
+	switch ($conn->{ model }) {
+		case 'cisco' {
+			$ssh->send ("enable");
+			$ssh->waitfor ('\:', TIMEOUT);
+			$ssh->send ($conn->{ priv_pass });
+			$ssh->waitfor ('\#', TIMEOUT);
+			$ssh->send ('conf t');
+			$ssh->waitfor ('\#', TIMEOUT);
+
+			$cmd = ($delete) ? "no ip route $route 255.255.255.255" : "ip route $route 255.255.255.255 null 0 tag 666";
+			$ssh->send ($cmd);
+			$ssh->waitfor ('\#', TIMEOUT);
+
+			$value = check_route ($ssh);
+		}
+		case 'force10' {
+			$ssh->send ("enable");
+			$ssh->waitfor ('\:', TIMEOUT);
+			$ssh->send ($conn->{ priv_pass });
+			$ssh->waitfor ('\#', TIMEOUT);
+			$ssh->send ('conf t');
+			$ssh->waitfor ('\#', TIMEOUT);
+
+			$cmd = ($delete) ? "no ip route $route/32" : "ip route $route/32 null 0 tag 666";
+			$ssh->send ($cmd);
+			$ssh->waitfor ('\#', TIMEOUT);
+
+			$value = check_route ($ssh);
+ 		}
+		case 'juniper' {
+			$ssh->send ("configure");
+			$ssh->waitfor ('\#', TIMEOUT);
+
+			$cmd = ($delete) ? "delete routing-options static route $route/32" : "set routing-options static route $route/32 discard";
+			$ssh->send ($cmd);
+			$ssh->waitfor ('\#', TIMEOUT);
+			$ssh->send ("commit");
+			$ssh->waitfor ('\#', TIMEOUT);
+
+			$value = check_route ($ssh);
+			$ssh->send ("quit");
+		}
+		else {
+			$value = 0;
+		}
+	}
+
+	return $value;
+}
+
+sub check_route {
+	my $ssh = shift;
+	my $value = 0;
+
+	switch ($conn->{ model }) {
+		case 'cisco' {
+			$ssh->send ("do sh ip route $route 255.255.255.255");
+			while (defined (my $line = $ssh->read_line () ) ) {
+				print "$line\n" if $verbose;
+				$value = 1 if $line =~ m/Known via \"static\"/;
+			}
+		}
+		case 'force10' {
+			$ssh->send ("do sh ip route $route/32 longer-prefixes");
+			while (defined (my $line = $ssh->read_line () ) ) {
+				print "$line\n" if $verbose;
+				$line =~ s/\s+/ /g;
+				$value = 1 if $line =~ m/S\s+$route\/32\sDirect/i;
+			}
+		}
+		case 'juniper' {
+			$ssh->send ("run sh route $route/32 exact");
+			while (defined (my $line = $ssh->read_line () ) ) {
+				print "$line\n" if $verbose;
+				$value = 1 if $line =~ m/Static/;
+			}
+		}
+	}
+
+	$value = invert_value ($value) if $delete;
+	return $value;
+}
+
+#
+# Executing
+# 
+my $value = set_blackhole ();
+my $_exit_code;
+if (!$value) {
+	print "Operation could not complete, try use key --verbose to debug\n";
+
+	$_exit_code = 1;
+} elsif ($value == 1) {
+	print "Operation for route $route/32 complete sucessfully\n";
+
+	if ($delete) {
+		del_logentry ();
+	} else {
+		add_logentry ();
+	}
+
+	$_exit_code = 0;
+} elsif ($value == 2) {
+	print "Blocked time for route $route/32 is low then 30 mins, use --force key to ignore this\n";
+
+	$_exit_code = 1;
+}
+
+exit $_exit_code;
