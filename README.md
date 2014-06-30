@@ -7,5 +7,5 @@ BGP configuration scripts
 INSTALL
 ==
 Pre-install
- + perl modules: HTML::Template, Config::Simple, GetOpt::Long, Data::Dumper, Switch;
+ + perl modules: HTML::Template, Config::Simple, Getopt::Long, Data::Dumper, Switch;
  + tools: whois
