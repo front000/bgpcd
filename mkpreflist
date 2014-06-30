@@ -32,6 +32,7 @@ help () if $help || !$origin;
 ### Configuration
 
 $config = "/etc/bgpcd.conf" if !$config;
+die "Used configuration file $config not exists!" if ! -e $config;
 my $cfg = Config::Simple->new ($config);
 
 undef $template if $template && $template eq 'dump';
@@ -70,8 +71,9 @@ sub help {
 	printf ("%15s ", "--help/-h");
 	printf "- view this help\n\n";
 
-	printf "Example:\n==========\n";
+	printf "Examples:\n==========\n";
 	printf "$0 -o AS-MTW\n";
+	printf "$0 -o as48347 -t force10\n";
 
 	exit 1;
 }
@@ -145,7 +147,7 @@ sub get_customers_by_autnum {
 		my ($method, $as, $type);
 		my @tmp = ();
 
-		$method = (split /\:/, $_)[ 0 ]; # input/export
+		$method = (split /\:/, $_)[ 0 ]; # import/export
 		$as = (split /\s+/, $_)[ 2 ];
 		$type = (split /accept\s+|announce\s+/, $_)[ 1 ];
 
