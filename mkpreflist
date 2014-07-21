@@ -30,20 +30,23 @@ GetOptions (
 help () if $help || !$origin;
 
 ### Configuration
-
 $config = "/etc/bgpcd.conf" if !$config;
-die "Used configuration file $config not exists!" if ! -e $config;
-my $cfg = Config::Simple->new ($config);
+die "Configuration file $config is not exists!" if ! -e $config;
+
+my $cfg		= Config::Simple->new ($config);
+my $tplpath	= $cfg->param ('main.tplpath');
+$whost		= ($whost) ? $whost : $cfg->param ('main.whost');
+my $prefix	= $cfg->param ('preflist.prefix');
 
 undef $template if $template && $template eq 'dump';
 my $tplfile = ($template) ? "$template.tpl" : "/dev/null";
 my $tpl = HTML::Template->new (
 	filename	=> $tplfile,
-	path		=> [ $cfg->param('tplpath') ],
+	path		=> [ $tplpath ],
 	die_on_bad_params	=> 0
 );
 
-my $whois = "/usr/bin/whois -h " . $cfg->param('whois_host');
+my $whois = "/usr/bin/whois -h $whost";
 
 ### Subroutine functions
 
@@ -57,7 +60,7 @@ sub help {
 
 	printf "Options:\n==========\n";
 	printf ("%15s ", "--template/-t");
-	printf "- output template (force10, cisco, juniper, dump), default dump\n";
+	printf "- output template (force10, cisco, juniper, dump, raw), default dump\n";
 	printf ("%15s ", "--config/-c");
 	printf "- config file, default /etc/bgpcd.conf\n";
 	printf ("%15s ", "--whois/-w");
@@ -100,7 +103,7 @@ sub get_preflist_name {
 sub generate_preflist_name_by_as {
 	my $as = shift;
 	$as =~ s/^AS\-//g;
-	return $cfg->param ('prefix') . "-" . lc ($as);
+	return "$prefix-" . lc ($as);
 }
 
 sub get_asname_by_autnum {
@@ -109,8 +112,6 @@ sub get_asname_by_autnum {
 	$as =~ s/\-AS[0-9]{0,}$//;
 	return $as;
 }
-
-### Functions
 
 sub get_customers_by_asset {
 	my $asset = shift || return 0;
