@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+
+perl_modules=( 
+	Data::Dumper
+	HTML::Template
+	Config::Simple
+	Getopt::Long
+	Switch
+)
+
+scripts=(
+	mkpreflist
+)
+
+PREFIX=/usr/bin
+CONF=/etc
+DOC=/usr/share
+
+function die()
+{
+	value="$1"
+	msg="$2"
+
+	[ -z "$msg" ] || echo "$msg"
+	exit "$value"
+}
+
+function rv()
+{
+	value="$1"
+	msg="$2"
+	exit_code="$3"
+
+	[ ! -z "$value" ] || return 1
+
+	echo -n "   "
+	if [ "$value" -eq 0 ]; then
+		printf "%-40s ok\n" "$msg" | sed "s/\s+ok/\_ok/g"
+	else
+		printf "%-20s false\n" "$msg" | sed 's/  /\./g'
+		[ -z "$exit_code" ] || exit "$exit_code"
+	fi
+
+	return "$value"
+}
+
+u=$(whoami)
+#[ $u = 'root' ] || die 1 "Run this app with root privileges"
+[ $u = 'root' ] || rv 1 "Run this app with root privileges" 1 
+
+echo "Checking installed modules:"
+for module in ${perl_modules[@]}
+do
+	/usr/bin/env perl -M$module -e 'print 1' > /dev/null 2>&1
+	rv $? "$module" 1
+done
+
+echo "Installing scripts:"
+for script in ${scripts[@]}
+do
+	/bin/cp -f "./$script" "$PREFIX/$script"
+	rv $? "$script"
+	chmod +x "$PREFIX/$script"
+done
+
+# installing doc
+echo "Installing doc/templates:"
+/bin/cp -fr usr/share/bgpcd "$DOC/"
+rv $? "doc/templates"
+
+# config
+echo "Installing config:"
+/bin/cp -f etc/bgpcd.conf "$CONF/"
+rv $? "$CONF/bgpcd.conf"
+
+exit 0
