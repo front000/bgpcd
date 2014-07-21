@@ -172,9 +172,58 @@ sub get_routes {
 		my $route = (split /\s+/, $routes[ $i ])[ 1 ];
 		$routes[ $i ] = $route;
 	}
+
+	return aggregate (\@routes) if $aggregate;
 	return \@routes;
 }
 
+
+### routes aggregate
+sub addr2int {
+	return unpack "N", pack "C4", split /\./, shift;
+}
+
+sub cidr2int {
+	return 0xffffffff << 32 - shift;
+}
+
+sub get_entry {
+	my ($r0, $c0) = split /\//, $_[0];
+	my ($r1, $c1) = split /\//, $_[1];
+
+	return 0 if $c0 == $c1; # cidrs equal
+	my ($ip, $net, $cidr, $rv) = ($c0 > $c1) ? ($r0, $r1, $c1, 2) : ($r1, $r0, $c0, 1); # rv - retval
+
+	$ip = addr2int ($ip);
+	$net = addr2int ($net);
+	$cidr = cidr2int ($cidr);
+
+	return $rv if ($ip & $cidr) == ($net & $cidr);
+	return 0;
+}
+
+sub aggregate {
+	my $ref = shift;
+
+	for (my $r = 0; $r < scalar @$ref; $r++) {
+		for (my $i = 0; $i < scalar @$ref; $i++) {
+			next if $i == $r;
+			my $rv = get_entry ($$ref[$r], $$ref[$i]);
+
+			if ($rv == 1) {
+				splice $ref, $i, 1;
+				aggregate ($ref);
+			} elsif ($rv == 2) {
+				splice $ref, $r, 1;
+				aggregate ($ref);
+			}
+		}
+	}
+
+	return $ref;
+}
+
+### Generating data
 sub mkdata {
 	my ($p_asset, $asset) = @_;
 	$asset = $p_asset if !defined $asset;
@@ -197,7 +246,6 @@ sub mkdata {
 	return 0;
 }
 
-### Generating data
 my $customers = ($origin =~ m/^AS\-/i) ? get_customers_by_asset ($origin) : get_customers_by_autnum ();
 foreach (@$customers) {
 	mkdata ($_);
